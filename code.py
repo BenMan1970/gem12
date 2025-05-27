@@ -10,7 +10,6 @@ st.set_page_config(page_title="Scanner Confluence Forex (TwelveData)", page_icon
 st.title("🔍 Scanner Confluence Forex Premium (Données Twelve Data)")
 st.markdown("*Utilisation de l'API Twelve Data pour les données de marché H1*")
 
-# --- Récupération Clé API Twelve Data ---
 TWELVEDATA_API_KEY = None
 try:
     TWELVEDATA_API_KEY = st.secrets["TWELVEDATA_API_KEY"]
@@ -24,19 +23,15 @@ if not TWELVEDATA_API_KEY:
 else:
     st.sidebar.success("Clé API Twelve Data chargée.")
 
-# --- Liste des paires Forex (Format Twelve Data) ---
-# Twelve Data utilise généralement des symboles comme 'EUR/USD', 'GBP/USD'
 FOREX_PAIRS_TWELVEDATA = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", 
     "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP"
-    # Pour XAU/USD, Twelve Data pourrait l'avoir sous un symbole comme 'XAU/USD' ou 'GOLD'.
-    # À vérifier dans leur documentation ou leur recherche de symboles.
-    # Je l'ajoute en supposant que 'XAU/USD' est valide, mais c'est à confirmer.
-    # "XAU/USD" 
 ]
 
-# --- Fonctions d'indicateurs techniques (INCHANGÉES) ---
-# (Ces fonctions restent les mêmes que dans les versions précédentes, je les inclus pour que le script soit complet)
+def format_finnhub_symbol(pair_str, broker_prefix="OANDA"): # Renommer en format_twelvedata_symbol si specifique
+    if ':' in pair_str: return pair_str # Pas typique pour TwelveData, mais au cas où
+    return pair_str # TwelveData utilise souvent 'EUR/USD' directement
+
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
 def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
 def hull_ma_pine(dc, p=20):
@@ -74,131 +69,151 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
     elif ccl<cbn:sig=-1
     return sig
 
-# --- Fonction get_data utilisant Twelve Data ---
-@st.cache_data(ttl=600) # Cache pour 10 minutes
+@st.cache_data(ttl=600) 
 def get_data_twelvedata(symbol_td: str, interval_td: str = '1h', outputsize_td: int = 300):
     global TWELVEDATA_API_KEY
     if TWELVEDATA_API_KEY is None: st.error("FATAL: Clé API Twelve Data non chargée."); print("FATAL: Clé API Twelve Data non chargée."); return None
-    
     print(f"\n--- Début get_data_twelvedata: sym='{symbol_td}', interval='{interval_td}', outputsize={outputsize_td} ---")
-    
     base_url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol_td,
-        "interval": interval_td, # Ex: 1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 1day, 1week, 1month
-        "apikey": TWELVEDATA_API_KEY,
-        "outputsize": outputsize_td,
-        "timezone": "UTC" # Demander les données en UTC
-    }
+    params = {"symbol": symbol_td, "interval": interval_td, "apikey": TWELVEDATA_API_KEY, "outputsize": outputsize_td, "timezone": "UTC"}
     response = None 
     try:
         response = requests.get(base_url, params=params)
         response.raise_for_status() 
-        
         data = response.json()
-        print(f"Données brutes Twelve Data reçues pour {symbol_td} (début): {str(data)[:300]}...")
-
-        if data.get('status') == 'error' or 'values' not in data or not data['values']:
-            error_message = data.get('message', 'Pas de données ou erreur inconnue.')
-            st.warning(f"Twelve Data: {error_message} pour {symbol_td} (intervalle {interval_td}).")
-            print(f"Twelve Data: {error_message} pour {symbol_td}. Réponse: {data}")
-            return None
-
-        # Les données sont dans 'values', qui est une liste de dictionnaires
+        print(f"Données brutes TD reçues pour {symbol_td} (début): {str(data)[:300]}...")
+        if data.get('status')=='error' or 'values' not in data or not data['values']:
+            err_msg=data.get('message','Pas de données ou erreur inconnue.')
+            st.warning(f"Twelve Data: {err_msg} pour {symbol_td} (intervalle {interval_td}).")
+            print(f"Twelve Data: {err_msg} pour {symbol_td}. Réponse: {data}"); return None
         df = pd.DataFrame(data['values'])
-        # Convertir les colonnes OHLC en numérique
-        cols_to_numeric = ['open', 'high', 'low', 'close']
-        for col in cols_to_numeric:
-            df[col] = pd.to_numeric(df[col])
-        
-        # Convertir 'datetime' en DatetimeIndex UTC et le définir comme index
-        df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
-        df.set_index('datetime', inplace=True)
-        
-        # Renommer les colonnes
+        cols_to_num=['open','high','low','close']; [df[c] = pd.to_numeric(df[c]) for c in cols_to_num]
+        df['datetime'] = pd.to_datetime(df['datetime'], utc=True); df.set_index('datetime', inplace=True)
         df.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close'}, inplace=True)
-        
-        # Twelve Data retourne les données du plus récent au plus ancien, il faut inverser
         df = df.iloc[::-1]
-        
-        if df.empty or len(df) < 55:
-            st.warning(f"Données Twelve Data insuffisantes/vides pour {symbol_td} ({len(df)} barres).")
-            print(f"Données Twelve Data insuffisantes/vides pour {symbol_td} ({len(df)} barres).")
-            return None
-        
-        print(f"Données pour {symbol_td} OK. Retour de {len(df)}l.\n--- Fin get_data_twelvedata {symbol_td} ---\n")
-        # S'assurer que les colonnes nécessaires sont présentes avant de retourner
-        return df[['Open', 'High', 'Low', 'Close']].dropna()
-
-
+        if df.empty or len(df) < 55: st.warning(f"Données TD<55 {symbol_td} ({len(df)})."); print(f"Données TD<55 {symbol_td} ({len(df)})."); return None
+        print(f"Données {symbol_td} OK. Retour {len(df[['Open','High','Low','Close']].dropna())}l.\n--- Fin get_data {symbol_td} ---\n"); return df[['Open','High','Low','Close']].dropna()
     except requests.exceptions.HTTPError as http_err:
-        st.error(f"Erreur HTTP Twelve Data pour {symbol_td}: {http_err}")
-        print(f"ERREUR HTTP TWELVEDATA {symbol_td}:\n{http_err}")
-        if response is not None: print(f"Réponse Twelve Data: {response.text}")
-        return None
-    except Exception as e:
-        st.error(f"Erreur inattendue get_data_twelvedata pour {symbol_td}: {type(e).__name__}")
-        st.exception(e); print(f"ERREUR INATTENDUE get_data_twelvedata {symbol_td}:\n{traceback.format_exc()}"); return None
+        st.error(f"Erreur HTTP TD {symbol_td}: {http_err}"); print(f"ERREUR HTTP TD {symbol_td}:\n{http_err}")
+        if response is not None: print(f"Réponse TD: {response.text}"); return None
+    except Exception as e: st.error(f"Erreur inattendue get_data_td {symbol_td}: {type(e).__name__}"); st.exception(e); print(f"ERREUR INATTENDUE get_data_td {symbol_td}:\n{traceback.format_exc()}"); return None
 
-# --- Fonction calculate_all_signals_pine (Version correctement indentée) ---
+# --- Fonction calculate_all_signals_pine (VERSION CORRECTEMENT INDENTÉE) ---
 def calculate_all_signals_pine(data):
-    # ... (La fonction calculate_all_signals_pine correctement indentée, comme fournie dans le message précédent)
-    if data is None or len(data) < 60: print(f"calculate_all_signals: Données non fournies ou trop courtes ({len(data) if data is not None else 'None'} lignes)."); return None
-    required_cols = ['Open', 'High', 'Low', 'Close']; 
-    if not all(col in data.columns for col in required_cols): print(f"calculate_all_signals: Colonnes OHLC manquantes."); return None
+    if data is None or len(data) < 60:
+        print(f"calculate_all_signals: Données non fournies ou trop courtes ({len(data) if data is not None else 'None'} lignes).")
+        return None
+    required_cols = ['Open', 'High', 'Low', 'Close']
+    if not all(col in data.columns for col in required_cols):
+        print(f"calculate_all_signals: Colonnes OHLC manquantes.")
+        return None
+    
     close = data['Close']; high = data['High']; low = data['Low']; open_price = data['Open']
     ohlc4 = (open_price + high + low + close) / 4
     bull_confluences, bear_confluences, signal_details_pine = 0, 0, {}
-    try: hma_series = hull_ma_pine(close, 20)
+
+    # 1. HMA
+    try:
+        hma_series = hull_ma_pine(close, 20)
         if len(hma_series) >= 2 and not hma_series.iloc[-2:].isna().any():
-            hma_val = hma_series.iloc[-1]; hma_prev = hma_series.iloc[-2]
-            if hma_val > hma_prev: bull_confluences += 1; signal_details_pine['HMA'] = "▲"
-            elif hma_val < hma_prev: bear_confluences += 1; signal_details_pine['HMA'] = "▼"
-            else: signal_details_pine['HMA'] = "─"
-        else: signal_details_pine['HMA'] = "N/A"
-    except Exception as e: signal_details_pine['HMA'] = "ErrHMA"; print(f"Erreur HMA: {e}")
-    try: rsi_series = rsi_pine(ohlc4, 10)
+            hma_val = hma_series.iloc[-1]
+            hma_prev = hma_series.iloc[-2]
+            if hma_val > hma_prev:
+                bull_confluences += 1; signal_details_pine['HMA'] = "▲"
+            elif hma_val < hma_prev:
+                bear_confluences += 1; signal_details_pine['HMA'] = "▼"
+            else:
+                signal_details_pine['HMA'] = "─"
+        else:
+            signal_details_pine['HMA'] = "N/A"
+    except Exception as e:
+        signal_details_pine['HMA'] = "ErrHMA"; print(f"Erreur HMA: {e}")
+
+    # 2. RSI
+    try:
+        rsi_series = rsi_pine(ohlc4, 10)
         if len(rsi_series) >=1 and not pd.isna(rsi_series.iloc[-1]):
             rsi_val = rsi_series.iloc[-1]; signal_details_pine['RSI_val'] = f"{rsi_val:.0f}"
-            if rsi_val > 50: bull_confluences += 1; signal_details_pine['RSI'] = f"▲({rsi_val:.0f})"
-            elif rsi_val < 50: bear_confluences += 1; signal_details_pine['RSI'] = f"▼({rsi_val:.0f})"
-            else: signal_details_pine['RSI'] = f"─({rsi_val:.0f})"
-        else: signal_details_pine['RSI'] = "N/A"
-    except Exception as e: signal_details_pine['RSI'] = "ErrRSI"; signal_details_pine['RSI_val'] = "N/A"; print(f"Erreur RSI: {e}")
-    try: adx_series = adx_pine(high, low, close, 14)
+            if rsi_val > 50:
+                bull_confluences += 1; signal_details_pine['RSI'] = f"▲({rsi_val:.0f})"
+            elif rsi_val < 50:
+                bear_confluences += 1; signal_details_pine['RSI'] = f"▼({rsi_val:.0f})"
+            else:
+                signal_details_pine['RSI'] = f"─({rsi_val:.0f})"
+        else:
+            signal_details_pine['RSI'] = "N/A"
+    except Exception as e:
+        signal_details_pine['RSI'] = "ErrRSI"; signal_details_pine['RSI_val'] = "N/A"; print(f"Erreur RSI: {e}")
+
+    # 3. ADX
+    try:
+        adx_series = adx_pine(high, low, close, 14)
         if len(adx_series) >= 1 and not pd.isna(adx_series.iloc[-1]):
             adx_val = adx_series.iloc[-1]; signal_details_pine['ADX_val'] = f"{adx_val:.0f}"
-            if adx_val >= 20: bull_confluences += 1; bear_confluences += 1; signal_details_pine['ADX'] = f"✔({adx_val:.0f})"
-            else: signal_details_pine['ADX'] = f"✖({adx_val:.0f})"
-        else: signal_details_pine['ADX'] = "N/A"
-    except Exception as e: signal_details_pine['ADX'] = "ErrADX"; signal_details_pine['ADX_val'] = "N/A"; print(f"Erreur ADX: {e}")
-    try: ha_open, ha_close = heiken_ashi_pine(data)
+            if adx_val >= 20:
+                bull_confluences += 1; bear_confluences += 1; signal_details_pine['ADX'] = f"✔({adx_val:.0f})"
+            else:
+                signal_details_pine['ADX'] = f"✖({adx_val:.0f})"
+        else:
+            signal_details_pine['ADX'] = "N/A"
+    except Exception as e:
+        signal_details_pine['ADX'] = "ErrADX"; signal_details_pine['ADX_val'] = "N/A"; print(f"Erreur ADX: {e}")
+
+    # 4. Heiken Ashi
+    try:
+        ha_open, ha_close = heiken_ashi_pine(data)
         if len(ha_open) >=1 and len(ha_close) >=1 and not pd.isna(ha_open.iloc[-1]) and not pd.isna(ha_close.iloc[-1]):
-            if ha_close.iloc[-1] > ha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['HA'] = "▲"
-            elif ha_close.iloc[-1] < ha_open.iloc[-1]: bear_confluences += 1; signal_details_pine['HA'] = "▼"
-            else: signal_details_pine['HA'] = "─"
-        else: signal_details_pine['HA'] = "N/A"
-    except Exception as e: signal_details_pine['HA'] = "ErrHA"; print(f"Erreur HA: {e}")
-    try: sha_open, sha_close = smoothed_heiken_ashi_pine(data, 10, 10)
+            if ha_close.iloc[-1] > ha_open.iloc[-1]:
+                bull_confluences += 1; signal_details_pine['HA'] = "▲"
+            elif ha_close.iloc[-1] < ha_open.iloc[-1]:
+                bear_confluences += 1; signal_details_pine['HA'] = "▼"
+            else:
+                signal_details_pine['HA'] = "─"
+        else:
+            signal_details_pine['HA'] = "N/A"
+    except Exception as e:
+        signal_details_pine['HA'] = "ErrHA"; print(f"Erreur HA: {e}")
+
+    # 5. Smoothed Heiken Ashi
+    try:
+        sha_open, sha_close = smoothed_heiken_ashi_pine(data, 10, 10)
         if len(sha_open) >=1 and len(sha_close) >=1 and not pd.isna(sha_open.iloc[-1]) and not pd.isna(sha_close.iloc[-1]):
-            if sha_close.iloc[-1] > sha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['SHA'] = "▲"
-            elif sha_close.iloc[-1] < sha_open.iloc[-1]: bear_confluences += 1; signal_details_pine['SHA'] = "▼"
-            else: signal_details_pine['SHA'] = "─"
-        else: signal_details_pine['SHA'] = "N/A"
-    except Exception as e: signal_details_pine['SHA'] = "ErrSHA"; print(f"Erreur SHA: {e}")
-    try: ichimoku_signal_val = ichimoku_pine_signal(high, low, close)
-        if ichimoku_signal_val == 1: bull_confluences += 1; signal_details_pine['Ichi'] = "▲"
-        elif ichimoku_signal_val == -1: bear_confluences += 1; signal_details_pine['Ichi'] = "▼"
-        elif ichimoku_signal_val == 0 and (len(data) < max(9,26,52) or (len(data) > 0 and pd.isna(data['Close'].iloc[-1]))): signal_details_pine['Ichi'] = "N/D"
-        else: signal_details_pine['Ichi'] = "─"
-    except Exception as e: signal_details_pine['Ichi'] = "ErrIchi"; print(f"Erreur Ichi: {e}")
-    confluence_value=max(bull_confluences,bear_confluences); direction="NEUTRE"
+            if sha_close.iloc[-1] > sha_open.iloc[-1]:
+                bull_confluences += 1; signal_details_pine['SHA'] = "▲"
+            elif sha_close.iloc[-1] < sha_open.iloc[-1]:
+                bear_confluences += 1; signal_details_pine['SHA'] = "▼"
+            else:
+                signal_details_pine['SHA'] = "─"
+        else:
+            signal_details_pine['SHA'] = "N/A"
+    except Exception as e:
+        signal_details_pine['SHA'] = "ErrSHA"; print(f"Erreur SHA: {e}")
+
+    # 6. Ichimoku
+    try:
+        ichimoku_signal_val = ichimoku_pine_signal(high, low, close)
+        if ichimoku_signal_val == 1:
+            bull_confluences += 1; signal_details_pine['Ichi'] = "▲"
+        elif ichimoku_signal_val == -1:
+            bear_confluences += 1; signal_details_pine['Ichi'] = "▼"
+        elif ichimoku_signal_val == 0 and \
+             (len(data) < max(9,26,52) or \
+             (len(data) > 0 and (pd.isna(data['Close'].iloc[-1]) or \
+                                pd.isna(high.rolling(window=max(9,26,52)).max().iloc[-1]) ) ) ): 
+            signal_details_pine['Ichi'] = "N/D"
+        else: 
+            signal_details_pine['Ichi'] = "─"
+    except Exception as e:
+        signal_details_pine['Ichi'] = "ErrIchi"; print(f"Erreur Ichi: {e}")
+    
+    confluence_value=max(bull_confluences,bear_confluences)
+    direction="NEUTRE"
     if bull_confluences > bear_confluences: direction="HAUSSIER"
     elif bear_confluences > bull_confluences: direction="BAISSIER"
     elif bull_confluences == bear_confluences and bull_confluences > 0: direction="CONFLIT"
     return{'confluence_P':confluence_value,'direction_P':direction,'bull_P':bull_confluences,'bear_P':bear_confluences,'rsi_P':signal_details_pine.get('RSI_val',"N/A"),'adx_P':signal_details_pine.get('ADX_val',"N/A"),'signals_P':signal_details_pine}
 
-def get_stars_pine(confluence_value): # Version corrigée
+def get_stars_pine(confluence_value):
     if confluence_value == 6: return "⭐⭐⭐⭐⭐⭐"
     elif confluence_value == 5: return "⭐⭐⭐⭐⭐"
     elif confluence_value == 4: return "⭐⭐⭐⭐"
@@ -207,35 +222,23 @@ def get_stars_pine(confluence_value): # Version corrigée
     elif confluence_value == 1: return "⭐"
     else: return "WAIT"
 
-# --- Interface Utilisateur ---
 col1,col2=st.columns([1,3])
 with col1:
     st.subheader("⚙️ Paramètres");min_conf=st.selectbox("Confluence min (0-6)",options=[0,1,2,3,4,5,6],index=3,format_func=lambda x:f"{x} (confluence)")
-    show_all=st.checkbox("Voir toutes les paires (ignorer filtre)");
-    scan_dis_td = TWELVEDATA_API_KEY is None; 
-    scan_tip_td="Clé Twelve Data non chargée." if scan_dis_td else "Lancer scan (Twelve Data)"
+    show_all=st.checkbox("Voir toutes les paires (ignorer filtre)");scan_dis_td=TWELVEDATA_API_KEY is None;scan_tip_td="Clé TwelveData non chargée." if scan_dis_td else "Lancer scan (TwelveData)"
     scan_btn=st.button("🔍 Scanner (Données Twelve Data H1)",type="primary",use_container_width=True,disabled=scan_dis_td,help=scan_tip_td)
-
 with col2:
     if scan_btn:
         st.info(f"🔄 Scan en cours (Twelve Data H1)...");pr_res=[];pb=st.progress(0);stx=st.empty()
         for i,pair_symbol in enumerate(FOREX_PAIRS_TWELVEDATA): 
-            pnd = pair_symbol # Utiliser le symbole tel quel pour l'affichage
-            cp=(i+1)/len(FOREX_PAIRS_TWELVEDATA);pb.progress(cp);stx.text(f"Analyse (Twelve Data H1):{pnd}({i+1}/{len(FOREX_PAIRS_TWELVEDATA)})")
-            
-            d_h1_td = get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300) 
-            
+            pnd=pair_symbol;cp=(i+1)/len(FOREX_PAIRS_TWELVEDATA);pb.progress(cp);stx.text(f"Analyse (Twelve Data H1):{pnd}({i+1}/{len(FOREX_PAIRS_TWELVEDATA)})")
+            d_h1_td=get_data_twelvedata(pair_symbol,interval_td="1h",outputsize_td=300) 
             if d_h1_td is not None:
                 sigs=calculate_all_signals_pine(d_h1_td)
                 if sigs:strs=get_stars_pine(sigs['confluence_P']);rd={'Paire':pnd,'Direction':sigs['direction_P'],'Conf. (0-6)':sigs['confluence_P'],'Étoiles':strs,'RSI':sigs['rsi_P'],'ADX':sigs['adx_P'],'Bull':sigs['bull_P'],'Bear':sigs['bear_P'],'details':sigs['signals_P']};pr_res.append(rd)
-                else:pr_res.append({'Paire':pnd,'Direction':'ERREUR CALCUL','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Calcul signaux (Twelve Data) échoué'}})
-            else:pr_res.append({'Paire':pnd,'Direction':'ERREUR DONNÉES TD','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Données Twelve Data non dispo/symb invalide(logs serveur)'}})
-            
-            # Limite Twelve Data gratuit: 8 crédits/minute. 1 appel = 1 crédit.
-            # Donc, environ 7.5 secondes par appel. Mettre 8 pour être sûr.
-            print(f"Pause de 8 secondes pour limite de taux Twelve Data...")
-            time.sleep(8) 
-            
+                else:pr_res.append({'Paire':pnd,'Direction':'ERREUR CALCUL','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Calcul signaux (TD) échoué'}})
+            else:pr_res.append({'Paire':pnd,'Direction':'ERREUR DONNÉES TD','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Données TD non dispo/symb invalide(logs)'}})
+            print(f"Pause 8s pour limite Twelve Data...");time.sleep(8) 
         pb.empty();stx.empty()
         if pr_res:
             dfa=pd.DataFrame(pr_res);dfd=dfa[dfa['Conf. (0-6)']>=min_conf].copy()if not show_all else dfa.copy()
@@ -252,9 +255,8 @@ with col2:
                         dc=st.columns(6);so=['HMA','RSI','ADX','HA','SHA','Ichi']
                         for idx,sk in enumerate(so):dc[idx].metric(label=sk,value=sm.get(sk,"N/P"))
                         st.divider()
-            else:st.warning(f"❌ Aucune paire avec critères filtrage (Twelve Data). Vérifiez erreurs données/symbole.")
+            else:st.warning(f"❌ Aucune paire avec critères filtrage (Twelve Data). Vérifiez erreurs.")
         else:st.error("❌ Aucune paire traitée (Twelve Data). Vérifiez logs serveur.")
-
 with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données Twelve Data)"):
     st.markdown("""**6 Signaux Confluence:** HMA(20),RSI(10),ADX(14)>=20,HA(Simple),SHA(10,10),Ichi(9,26,52).**Comptage & Étoiles:**Pine.**Source:**Twelve Data API.""")
-st.caption("Scanner H1 (Twelve Data). Multi-TF non actif. Attention aux limites de taux de l'API Twelve Data.")
+st.caption("Scanner H1 (Twelve Data). Multi-TF non actif. Attention aux limites de taux API.")
