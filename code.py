@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 import time
 import requests
 
@@ -28,7 +27,7 @@ FOREX_PAIRS_TWELVEDATA = [
     "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP"
 ]
 
-# --- Fonctions techniques robustes ---
+# --- Fonctions indicateurs techniques ---
 def safe_ewm_mean(series, **kwargs):
     if series.isnull().all() or len(series.dropna()) < kwargs.get('span', kwargs.get('com', kwargs.get('halflife', 1))):
         return pd.Series(np.nan, index=series.index)
@@ -138,7 +137,6 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
     try:
         tenkan_sen = (df_high.rolling(window=tenkan_p).max() + df_low.rolling(window=tenkan_p).min()) / 2
         kijun_sen = (df_high.rolling(window=kijun_p).max() + df_low.rolling(window=kijun_p).min()) / 2
-        senkou_span_b = (df_high.rolling(window=senkou_b_p).max() + df_low.rolling(window=senkou_b_p).min()) / 2
         if tenkan_sen.iloc[-1] > kijun_sen.iloc[-1] and df_close.iloc[-1] > kijun_sen.iloc[-1]:
             return 1
         elif tenkan_sen.iloc[-1] < kijun_sen.iloc[-1] and df_close.iloc[-1] < kijun_sen.iloc[-1]:
@@ -152,7 +150,6 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
 # --- Fonction de récupération des données Twelve Data ---
 def get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300):
     try:
-        symbol = pair_symbol.replace("/", "")
         url = (
             f"https://api.twelvedata.com/time_series?"
             f"symbol={pair_symbol}&interval={interval_td}&outputsize={outputsize_td}&apikey={TWELVEDATA_API_KEY}&format=JSON"
@@ -160,7 +157,8 @@ def get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300):
         resp = requests.get(url, timeout=10)
         data = resp.json()
         if "values" not in data:
-            print(f"Erreur TwelveData: {data.get('message', 'Aucune donnée reçue')}")
+            st.warning(f"Erreur TwelveData pour {pair_symbol}: {data.get('message', 'Aucune donnée reçue')}")
+            print(f"Erreur TwelveData: {data}")
             return None
         df = pd.DataFrame(data["values"])
         for col in ["open", "high", "low", "close"]:
@@ -172,6 +170,7 @@ def get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300):
         df = df.sort_values("datetime").reset_index(drop=True)
         return df[["datetime", "Open", "High", "Low", "Close"]]
     except Exception as e:
+        st.warning(f"Erreur lors du fetch TwelveData pour {pair_symbol}: {e}")
         print(f"Erreur lors du fetch TwelveData pour {pair_symbol}: {e}")
         return None
 
@@ -350,32 +349,31 @@ with col2:
             pb.progress(cp)
             stx.text(f"Analyse: {pnd} ({i+1}/{total_pairs})")
             d_h1_td = get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300)
-            if d_h1_td is not None and not d_h1_td.empty:
-                sigs = calculate_all_signals_pine(d_h1_td)
-                if sigs:
-                    strs = get_stars_pine(sigs['confluence_P'])
-                    rd = {
-                        'Paire': pnd,
-                        'Direction': sigs['direction_P'],
-                        'Conf. (0-6)': sigs['confluence_P'],
-                        'Étoiles': strs,
-                        'RSI': sigs['rsi_P'],
-                        'ADX': sigs['adx_P'],
-                        'Bull': sigs['bull_P'],
-                        'Bear': sigs['bear_P'],
-                        'details': sigs['signals_P']
-                    }
-                    pr_res.append(rd)
-                else:
-                    pr_res.append({'Paire': pnd, 'Direction': 'ERR CALC', 'Conf. (0-6)': 0,
-                                   'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
-                                   'details': {'Info': 'Calcul échoué (TD)'}})
-            else:
+            if d_h1_td is None or d_h1_td.empty:
                 pr_res.append({'Paire': pnd, 'Direction': 'ERR DATA', 'Conf. (0-6)': 0,
                                'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
                                'details': {'Info': 'Données TD non dispo (logs)'}})
+                continue
+            sigs = calculate_all_signals_pine(d_h1_td)
+            if sigs:
+                strs = get_stars_pine(sigs['confluence_P'])
+                rd = {
+                    'Paire': pnd,
+                    'Direction': sigs['direction_P'],
+                    'Conf. (0-6)': sigs['confluence_P'],
+                    'Étoiles': strs,
+                    'RSI': sigs['rsi_P'],
+                    'ADX': sigs['adx_P'],
+                    'Bull': sigs['bull_P'],
+                    'Bear': sigs['bear_P'],
+                    'details': sigs['signals_P']
+                }
+                pr_res.append(rd)
+            else:
+                pr_res.append({'Paire': pnd, 'Direction': 'ERR CALC', 'Conf. (0-6)': 0,
+                               'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
+                               'details': {'Info': 'Calcul échoué (TD)'}})
             if i < total_pairs - 1:
-                print(f"Pause 8s pour limite TD...")
                 time.sleep(8)
         pb.empty()
         stx.empty()
@@ -409,4 +407,3 @@ with col2:
 with st.expander("ℹ️ Informations"):
     st.markdown("""**Signaux:** HMA(20),RSI(10),ADX(14)>=20,HA,SHA(10,10),Ichi(9,26,52). **Source:** TwelveData API.""")
     st.caption("Scanner H1 (TwelveData). Respectez limites API.")
-
