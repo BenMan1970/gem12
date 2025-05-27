@@ -1,590 +1,262 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import traceback 
 import requests 
-import warnings
-warnings.filterwarnings('ignore')
 
-# Configuration de la page
-st.set_page_config(
-    page_title="Scanner Confluence Forex (TwelveData)", 
-    page_icon="⭐", 
-    layout="wide"
-)
+st.set_page_config(page_title="Scanner Confluence Forex (TwelveData)", page_icon="⭐", layout="wide")
+st.title("🔍 Scanner Confluence Forex Premium (Données Twelve Data)")
+st.markdown("*Analyse technique multi-indicateurs avec données TwelveData H1*") # Titre du script Claude
 
-st.title("🔍 Scanner Confluence Forex Premium")
-st.markdown("*Analyse technique multi-indicateurs avec données TwelveData H1*")
-
-# Gestion de la clé API
+# Gestion de la clé API (inspiré par Claude pour la clarté)
 TWELVEDATA_API_KEY = None
-
 try:
-    TWELVEDATA_API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
+    TWELVEDATA_API_KEY = st.secrets.get("TWELVEDATA_API_KEY") # Utiliser .get pour éviter KeyError direct
     if TWELVEDATA_API_KEY:
         st.sidebar.success("✅ Clé API TwelveData chargée")
     else:
-        st.sidebar.error("❌ Clé API manquante")
-        st.error("**Configuration requise:** Ajoutez TWELVEDATA_API_KEY dans les secrets Streamlit")
-        st.stop()
+        st.sidebar.error("❌ Clé API TwelveData manquante dans les secrets.")
+        st.error("**Configuration requise:** Ajoutez TWELVEDATA_API_KEY dans les secrets Streamlit.")
+        st.stop() # Arrêter si la clé n'est pas là
 except Exception as e:
-    st.sidebar.error("❌ Erreur de configuration")
-    st.error("Vérifiez la configuration des secrets Streamlit")
+    st.sidebar.error("❌ Erreur de configuration des secrets.")
+    st.error(f"Vérifiez la configuration des secrets Streamlit: {e}")
     st.stop()
 
-# Paires Forex
-FOREX_PAIRS = [
+FOREX_PAIRS_TWELVEDATA = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", 
     "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP"
 ]
 
-# Fonctions indicateurs techniques
-def safe_ema(series, period):
-    """EMA sécurisée"""
-    try:
-        if len(series) < period:
-            return pd.Series([np.nan] * len(series), index=series.index)
-        return series.ewm(span=period, adjust=False).mean()
-    except:
-        return pd.Series([np.nan] * len(series), index=series.index)
+# --- Fonctions indicateurs techniques (rendues plus "sûres") ---
+def safe_ewm_mean(series, **kwargs):
+    if series.isnull().all() or len(series.dropna()) < kwargs.get('span', kwargs.get('com', kwargs.get('halflife', 1))): # Vérif plus robuste
+        return pd.Series(np.nan, index=series.index)
+    return series.ewm(**kwargs).mean()
 
-def safe_rma(series, period):
-    """RMA sécurisée (Wilder's MA)"""
-    try:
-        if len(series) < period:
-            return pd.Series([np.nan] * len(series), index=series.index)
-        return series.ewm(alpha=1/period, adjust=False).mean()
-    except:
-        return pd.Series([np.nan] * len(series), index=series.index)
+def ema(s, p): return safe_ewm_mean(s, span=p, adjust=False)
+def rma(s, p): return safe_ewm_mean(s, alpha=1/p, adjust=False)
 
-def calculate_hull_ma(close_prices, period=20):
-    """Hull Moving Average"""
+def hull_ma_pine(dc, p=20):
+    if len(dc.dropna()) < p + int(np.sqrt(p)): return pd.Series(np.nan, index=dc.index) # Données insuffisantes
     try:
-        if len(close_prices) < period:
-            return pd.Series([np.nan] * len(close_prices), index=close_prices.index)
+        hl=max(1,int(p/2)); sl=max(1,int(np.sqrt(p)))
+        # Assurer que les rolling windows ne sont pas plus grandes que les données
+        if len(dc.dropna()) < hl or len(dc.dropna()) < p: return pd.Series(np.nan, index=dc.index)
+
+        wma1=dc.rolling(window=hl).apply(lambda x:np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1)) if len(x)==hl else np.nan, raw=True)
+        wma2=dc.rolling(window=p).apply(lambda x:np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1)) if len(x)==p else np.nan, raw=True)
         
-        half_period = max(1, int(period / 2))
-        sqrt_period = max(1, int(np.sqrt(period)))
+        raw_hma=2*wma1-wma2
+        if len(raw_hma.dropna()) < sl : return pd.Series(np.nan, index=dc.index)
         
-        def weighted_ma(data, length):
-            if len(data) < length:
-                return np.nan
-            weights = np.arange(1, length + 1)
-            return np.average(data[-length:], weights=weights)
-        
-        wma1 = close_prices.rolling(window=half_period).apply(
-            lambda x: weighted_ma(x.values, len(x)), raw=False
-        )
-        wma2 = close_prices.rolling(window=period).apply(
-            lambda x: weighted_ma(x.values, len(x)), raw=False
-        )
-        
-        raw_hma = 2 * wma1 - wma2
-        hma = raw_hma.rolling(window=sqrt_period).apply(
-            lambda x: weighted_ma(x.values, len(x)), raw=False
-        )
-        
+        hma = raw_hma.rolling(window=sl).apply(lambda x:np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1)) if len(x)==sl else np.nan, raw=True)
         return hma
-    except:
-        return pd.Series([np.nan] * len(close_prices), index=close_prices.index)
+    except Exception as e: print(f"Erreur dans hull_ma_pine: {e}"); return pd.Series(np.nan, index=dc.index)
 
-def calculate_rsi(price_data, period=14):
-    """RSI Calculation"""
+def rsi_pine(po4,p=10):
+    if len(po4.dropna()) < p + 1: return pd.Series(50.0, index=po4.index)
     try:
-        if len(price_data) < period + 1:
-            return pd.Series([50] * len(price_data), index=price_data.index)
-        
-        delta = price_data.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-        
-        avg_gain = safe_rma(gain, period)
-        avg_loss = safe_rma(loss, period)
-        
-        avg_loss = avg_loss.replace(0, 1e-10)
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        return rsi.fillna(50)
-    except:
-        return pd.Series([50] * len(price_data), index=price_data.index)
+        d=po4.diff();g=d.where(d>0,0.0);l=-d.where(d<0,0.0)
+        ag=rma(g,p);al=rma(l,p)
+        al_safe = al.replace(0,1e-9) # Eviter division par zéro
+        rs=ag/al_safe
+        rsi=100-(100/(1+rs));return rsi.fillna(50)
+    except Exception as e: print(f"Erreur dans rsi_pine: {e}"); return pd.Series(50.0, index=po4.index)
 
-def calculate_adx(high, low, close, period=14):
-    """ADX Calculation"""
+def adx_pine(h,l,c,p=14):
+    if len(h.dropna()) < p*2 or len(l.dropna()) < p*2 or len(c.dropna()) < p*2: # ADX a besoin de plus de données pour se stabiliser
+        return pd.Series(0.0, index=h.index)
     try:
-        if len(high) < period + 1:
-            return pd.Series([0] * len(high), index=high.index)
-        
-        # True Range
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        # Directional Movement
-        up_move = high.diff()
-        down_move = low.shift(1) - low
-        
-        plus_dm = pd.Series(
-            np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
-            index=high.index
-        )
-        minus_dm = pd.Series(
-            np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
-            index=high.index
-        )
-        
-        # Smoothed values
-        atr = safe_rma(tr, period)
-        plus_di = 100 * (safe_rma(plus_dm, period) / atr.replace(0, 1e-10))
-        minus_di = 100 * (safe_rma(minus_dm, period) / atr.replace(0, 1e-10))
-        
-        # ADX
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)
-        adx = safe_rma(dx, period)
-        
-        return adx.fillna(0)
-    except:
-        return pd.Series([0] * len(high), index=high.index)
+        tr1=h-l;tr2=abs(h-c.shift(1));tr3=abs(l-c.shift(1));tr=pd.concat([tr1,tr2,tr3],axis=1).max(axis=1);atr=rma(tr,p)
+        um=h.diff();dm=l.shift(1)-l
+        pdm=pd.Series(np.where((um>dm)&(um>0),um,0.0),index=h.index);mdm=pd.Series(np.where((dm>um)&(dm>0),dm,0.0),index=h.index)
+        satr=atr.replace(0,1e-9);pdi=100*(rma(pdm,p)/satr);mdi=100*(rma(mdm,p)/satr)
+        dxden=(pdi+mdi).replace(0,1e-9);dx=100*(abs(pdi-mdi)/dxden);return rma(dx,p).fillna(0)
+    except Exception as e: print(f"Erreur dans adx_pine: {e}"); return pd.Series(0.0, index=h.index)
 
-def calculate_heiken_ashi(ohlc_df):
-    """Heiken Ashi Calculation"""
+def heiken_ashi_pine(dfo):
+    if len(dfo.dropna()) < 1: return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
     try:
-        if ohlc_df.empty:
-            return pd.Series(dtype=float), pd.Series(dtype=float)
-        
-        ha_close = (ohlc_df['Open'] + ohlc_df['High'] + ohlc_df['Low'] + ohlc_df['Close']) / 4
-        ha_open = pd.Series(index=ohlc_df.index, dtype=float)
-        
-        ha_open.iloc[0] = (ohlc_df['Open'].iloc[0] + ohlc_df['Close'].iloc[0]) / 2
-        
-        for i in range(1, len(ohlc_df)):
-            ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
-        
-        return ha_open, ha_close
-    except:
-        return pd.Series(dtype=float), pd.Series(dtype=float)
+        ha=pd.DataFrame(index=dfo.index)
+        ha['HA_Close']=(dfo['Open']+dfo['High']+dfo['Low']+dfo['Close'])/4;ha['HA_Open']=np.nan
+        if not dfo.empty: # Devrait toujours être vrai si len > 0
+            ha.iloc[0,ha.columns.get_loc('HA_Open')]=(dfo['Open'].iloc[0]+dfo['Close'].iloc[0])/2
+            for i in range(1,len(dfo)):ha.iloc[i,ha.columns.get_loc('HA_Open')]=(ha.iloc[i-1,ha.columns.get_loc('HA_Open')]+ha.iloc[i-1,ha.columns.get_loc('HA_Close')])/2
+        return ha['HA_Open'],ha['HA_Close']
+    except Exception as e: print(f"Erreur dans heiken_ashi_pine: {e}"); return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
 
-def calculate_smoothed_ha(ohlc_df, period1=10, period2=10):
-    """Smoothed Heiken Ashi"""
+def smoothed_heiken_ashi_pine(dfo,l1=10,l2=10):
+    if len(dfo.dropna()) < max(l1,l2) +1 : return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
     try:
-        smooth_ohlc = pd.DataFrame({
-            'Open': safe_ema(ohlc_df['Open'], period1),
-            'High': safe_ema(ohlc_df['High'], period1),
-            'Low': safe_ema(ohlc_df['Low'], period1),
-            'Close': safe_ema(ohlc_df['Close'], period1)
-        })
-        
-        ha_open, ha_close = calculate_heiken_ashi(smooth_ohlc)
-        
-        sha_open = safe_ema(ha_open, period2)
-        sha_close = safe_ema(ha_close, period2)
-        
-        return sha_open, sha_close
-    except:
-        return pd.Series(dtype=float), pd.Series(dtype=float)
+        eo=ema(dfo['Open'],l1);eh=ema(dfo['High'],l1);el=ema(dfo['Low'],l1);ec=ema(dfo['Close'],l1)
+        hai=pd.DataFrame({'Open':eo,'High':eh,'Low':el,'Close':ec},index=dfo.index).dropna() # Drop NaNs from EMA
+        if hai.empty: return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
+            
+        hao_i,hac_i=heiken_ashi_pine(hai);
+        sho=ema(hao_i,l2);shc=ema(hac_i,l2);return sho,shc
+    except Exception as e: print(f"Erreur dans smoothed_heiken_ashi_pine: {e}"); return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
 
-def calculate_ichimoku_signal(high, low, close, tenkan=9, kijun=26, senkou_b=52):
-    """Ichimoku Cloud Signal"""
+def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senkou_b_p=52):
+    min_len_req=max(tenkan_p,kijun_p,senkou_b_p)
+    if len(df_high.dropna())<min_len_req or len(df_low.dropna())<min_len_req or len(df_close.dropna())<min_len_req:print(f"Ichi:Data<({len(df_close)}) vs req {min_len_req}.");return 0
     try:
-        min_length = max(tenkan, kijun, senkou_b)
-        if len(high) < min_length:
-            return 0
-        
-        tenkan_sen = (high.rolling(tenkan).max() + low.rolling(tenkan).min()) / 2
-        kijun_sen = (high.rolling(kijun).max() + low.rolling(kijun).min()) / 2
-        
-        senkou_a = (tenkan_sen + kijun_sen) / 2
-        senkou_b = (high.rolling(senkou_b).max() + low.rolling(senkou_b).min()) / 2
-        
-        current_close = close.iloc[-1]
-        current_senkou_a = senkou_a.iloc[-1]
-        current_senkou_b = senkou_b.iloc[-1]
-        
-        if pd.isna(current_close) or pd.isna(current_senkou_a) or pd.isna(current_senkou_b):
-            return 0
-        
-        cloud_top = max(current_senkou_a, current_senkou_b)
-        cloud_bottom = min(current_senkou_a, current_senkou_b)
-        
-        if current_close > cloud_top:
-            return 1  # Bullish
-        elif current_close < cloud_bottom:
-            return -1  # Bearish
-        else:
-            return 0  # Neutral (inside cloud)
-    except:
-        return 0
+        ts=(df_high.rolling(window=tenkan_p).max()+df_low.rolling(window=tenkan_p).min())/2;ks=(df_high.rolling(window=kijun_p).max()+df_low.rolling(window=kijun_p).min())/2
+        sa=(ts+ks)/2;sb=(df_high.rolling(window=senkou_b_p).max()+df_low.rolling(window=senkou_b_p).min())/2
+        if pd.isna(df_close.iloc[-1]) or pd.isna(sa.iloc[-1]) or pd.isna(sb.iloc[-1]):print("Ichi:NaN close/spans.");return 0
+        ccl=df_close.iloc[-1];cssa=sa.iloc[-1];cssb=sb.iloc[-1];ctn=max(cssa,cssb);cbn=min(cssa,cssb);sig=0
+        if ccl>ctn:sig=1
+        elif ccl<cbn:sig=-1
+        return sig
+    except Exception as e: print(f"Erreur dans ichimoku_pine_signal: {e}"); return 0
 
-@st.cache_data(ttl=300)
-def fetch_twelvedata(symbol, interval='1h', size=300):
-    """Récupère les données de TwelveData"""
-    if not TWELVEDATA_API_KEY:
-        return None
-    
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        'symbol': symbol,
-        'interval': interval,
-        'apikey': TWELVEDATA_API_KEY,
-        'outputsize': size,
-        'timezone': 'UTC'
-    }
-    
+
+@st.cache_data(ttl=600) 
+def get_data_twelvedata(symbol_td: str, interval_td: str = '1h', outputsize_td: int = 300):
+    global TWELVEDATA_API_KEY # Assurez-vous que cette variable globale est bien celle définie en haut
+    if not TWELVEDATA_API_KEY: st.error("FATAL: Clé API Twelve Data non chargée."); print("FATAL: Clé API TD non chargée."); return None
+    print(f"\n--- Début get_data_twelvedata: sym='{symbol_td}', interval='{interval_td}', outputsize={outputsize_td} ---")
+    base_url = "https://api.twelvedata.com/time_series"
+    params = {"symbol": symbol_td, "interval": interval_td, "apikey": TWELVEDATA_API_KEY, "outputsize": outputsize_td, "timezone": "UTC"}
+    response = None 
     try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
+        response = requests.get(base_url, params=params, timeout=20) # Ajout d'un timeout
+        response.raise_for_status() 
         data = response.json()
-        
-        if data.get('status') == 'error':
-            st.warning(f"API Error pour {symbol}: {data.get('message', 'Unknown error')}")
+        print(f"Données brutes TD reçues pour {symbol_td} (status:{data.get('code','N/A')} msg:{data.get('message','N/A')} début): {str(data.get('values',''))[:100]}...")
+        if data.get('status') == 'error' or 'values' not in data or not isinstance(data['values'], list) or not data['values']:
+            err_msg = data.get('message', f"Pas de données valides ('values') pour {symbol_td}.")
+            st.warning(f"Twelve Data: {err_msg} (Intervalle: {interval_td}).")
+            print(f"Twelve Data: {err_msg}. Réponse: {data}")
             return None
-        
-        if 'values' not in data or not data.get('values'):
-            st.warning(f"Pas de données pour {symbol}")
-            return None
-        
         df = pd.DataFrame(data['values'])
+        if df.empty: st.warning(f"DF vide après parsing JSON pour {symbol_td}."); print(f"DF vide après parsing JSON {symbol_td}."); return None
         
-        # Conversion des types
-        numeric_cols = ['open', 'high', 'low', 'close']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        cols_to_numeric = ['open', 'high', 'low', 'close']; df[cols_to_numeric] = df[cols_to_numeric].apply(pd.to_numeric, errors='coerce')
+        df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce', utc=True); df.set_index('datetime', inplace=True)
+        df.sort_index(inplace=True) # Assurer l'ordre chronologique
+        df.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close'}, inplace=True)
         
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        df.set_index('datetime', inplace=True)
-        df.sort_index(inplace=True)  # Plus ancien au plus récent
+        df_ohlc = df[['Open', 'High', 'Low', 'Close']].dropna() # Garder seulement OHLC et supprimer les lignes avec NaN dans ces colonnes
         
-        # Renommage
-        df.rename(columns={
-            'open': 'Open', 'high': 'High', 
-            'low': 'Low', 'close': 'Close'
-        }, inplace=True)
-        
-        # Validation
-        df = df[['Open', 'High', 'Low', 'Close']].dropna()
-        
-        if len(df) < 60:
-            st.warning(f"Données insuffisantes pour {symbol}: {len(df)} barres")
+        if df_ohlc.empty or len(df_ohlc) < 60: # Seuil minimum pour analyse
+            st.warning(f"Données TD insuffisantes pour analyse de {symbol_td} ({len(df_ohlc)} barres valides). Requis: 60.")
+            print(f"Données TD insuffisantes pour {symbol_td} ({len(df_ohlc)} barres). Requis: 60.")
             return None
         
-        return df
-        
-    except requests.RequestException as e:
-        st.error(f"Erreur réseau pour {symbol}: {str(e)}")
-        return None
+        print(f"Données pour {symbol_td} OK. Retour de {len(df_ohlc)} lignes.\n--- Fin get_data_twelvedata {symbol_td} ---\n")
+        return df_ohlc
+    except requests.exceptions.HTTPError as http_err:
+        st.error(f"Erreur HTTP TD {symbol_td}: {http_err}"); print(f"ERREUR HTTP TD {symbol_td}:\n{http_err}")
+        if response is not None: print(f"Réponse TD: {response.text}"); return None
+    except requests.exceptions.RequestException as req_err: # Plus général pour les erreurs réseau
+        st.error(f"Erreur Réseau TD {symbol_td}: {req_err}"); print(f"ERREUR RÉSEAU TD {symbol_td}:\n{req_err}"); return None
     except Exception as e:
-        st.error(f"Erreur inattendue pour {symbol}: {str(e)}")
-        return None
+        st.error(f"Erreur inattendue get_data_td {symbol_td}: {type(e).__name__}"); st.exception(e); print(f"ERREUR INATTENDUE get_data_td {symbol_td}:\n{traceback.format_exc()}"); return None
 
-def analyze_signals(data):
-    """Analyse tous les signaux techniques"""
-    if data is None or len(data) < 60:
-        return None
-    
-    try:
-        close = data['Close']
-        high = data['High']
-        low = data['Low']
-        open_price = data['Open']
-        
-        # OHLC4 pour RSI
-        ohlc4 = (open_price + high + low + close) / 4
-        
-        bulls = 0
-        bears = 0
-        signals = {}
-        
-        # 1. Hull MA
-        try:
-            hma = calculate_hull_ma(close, 20)
-            if len(hma) >= 2 and not hma.iloc[-2:].isna().any():
-                if hma.iloc[-1] > hma.iloc[-2]:
-                    bulls += 1
-                    signals['HMA'] = "▲"
-                elif hma.iloc[-1] < hma.iloc[-2]:
-                    bears += 1
-                    signals['HMA'] = "▼"
-                else:
-                    signals['HMA'] = "─"
-            else:
-                signals['HMA'] = "N/A"
-        except:
-            signals['HMA'] = "Err"
-        
-        # 2. RSI
-        try:
-            rsi = calculate_rsi(ohlc4, 10)
-            if not pd.isna(rsi.iloc[-1]):
-                rsi_val = rsi.iloc[-1]
-                signals['RSI_val'] = f"{rsi_val:.0f}"
-                if rsi_val > 50:
-                    bulls += 1
-                    signals['RSI'] = f"▲({rsi_val:.0f})"
-                elif rsi_val < 50:
-                    bears += 1
-                    signals['RSI'] = f"▼({rsi_val:.0f})"
-                else:
-                    signals['RSI'] = f"─({rsi_val:.0f})"
-            else:
-                signals['RSI'] = "N/A"
-                signals['RSI_val'] = "N/A"
-        except:
-            signals['RSI'] = "Err"
-            signals['RSI_val'] = "N/A"
-        
-        # 3. ADX
-        try:
-            adx = calculate_adx(high, low, close, 14)
-            if not pd.isna(adx.iloc[-1]):
-                adx_val = adx.iloc[-1]
-                signals['ADX_val'] = f"{adx_val:.0f}"
-                if adx_val >= 20:
-                    bulls += 1
-                    bears += 1  # ADX indique la force, pas la direction
-                    signals['ADX'] = f"✔({adx_val:.0f})"
-                else:
-                    signals['ADX'] = f"✖({adx_val:.0f})"
-            else:
-                signals['ADX'] = "N/A"
-                signals['ADX_val'] = "N/A"
-        except:
-            signals['ADX'] = "Err"
-            signals['ADX_val'] = "N/A"
-        
-        # 4. Heiken Ashi
-        try:
-            ha_open, ha_close = calculate_heiken_ashi(data)
-            if not pd.isna(ha_open.iloc[-1]) and not pd.isna(ha_close.iloc[-1]):
-                if ha_close.iloc[-1] > ha_open.iloc[-1]:
-                    bulls += 1
-                    signals['HA'] = "▲"
-                elif ha_close.iloc[-1] < ha_open.iloc[-1]:
-                    bears += 1
-                    signals['HA'] = "▼"
-                else:
-                    signals['HA'] = "─"
-            else:
-                signals['HA'] = "N/A"
-        except:
-            signals['HA'] = "Err"
-        
-        # 5. Smoothed Heiken Ashi
-        try:
-            sha_open, sha_close = calculate_smoothed_ha(data, 10, 10)
-            if not pd.isna(sha_open.iloc[-1]) and not pd.isna(sha_close.iloc[-1]):
-                if sha_close.iloc[-1] > sha_open.iloc[-1]:
-                    bulls += 1
-                    signals['SHA'] = "▲"
-                elif sha_close.iloc[-1] < sha_open.iloc[-1]:
-                    bears += 1
-                    signals['SHA'] = "▼"
-                else:
-                    signals['SHA'] = "─"
-            else:
-                signals['SHA'] = "N/A"
-        except:
-            signals['SHA'] = "Err"
-        
-        # 6. Ichimoku
-        try:
-            ichi_signal = calculate_ichimoku_signal(high, low, close)
-            if ichi_signal == 1:
-                bulls += 1
-                signals['Ichi'] = "▲"
-            elif ichi_signal == -1:
-                bears += 1
-                signals['Ichi'] = "▼"
-            else:
-                signals['Ichi'] = "─"
-        except:
-            signals['Ichi'] = "Err"
-        
-        # Résultat final
-        confluence = max(bulls, bears)
-        
-        if bulls > bears:
-            direction = "HAUSSIER"
-        elif bears > bulls:
-            direction = "BAISSIER"
-        elif bulls == bears and bulls > 0:
-            direction = "CONFLIT"
-        else:
-            direction = "NEUTRE"
-        
-        return {
-            'confluence': confluence,
-            'direction': direction,
-            'bulls': bulls,
-            'bears': bears,
-            'rsi_val': signals.get('RSI_val', "N/A"),
-            'adx_val': signals.get('ADX_val', "N/A"),
-            'signals': signals
-        }
-        
-    except Exception as e:
-        print(f"Erreur dans analyze_signals: {e}")
-        return None
+# --- Fonction calculate_all_signals_pine (Version correctement indentée) ---
+def calculate_all_signals_pine(data):
+    # ... (la version que je t'ai donnée dans le message précédent, qui est correcte)
+    if data is None or len(data) < 60: print(f"calculate_all_signals: Données non fournies ou trop courtes ({len(data) if data is not None else 'None'} lignes)."); return None
+    required_cols = ['Open', 'High', 'Low', 'Close']; 
+    if not all(col in data.columns for col in required_cols): print(f"calculate_all_signals: Colonnes OHLC manquantes."); return None
+    close = data['Close']; high = data['High']; low = data['Low']; open_price = data['Open']
+    ohlc4 = (open_price + high + low + close) / 4
+    bull_confluences, bear_confluences, signal_details_pine = 0, 0, {}
+    try: hma_series = hull_ma_pine(close, 20)
+        if len(hma_series) >= 2 and not hma_series.iloc[-2:].isna().any():
+            hma_val = hma_series.iloc[-1]; hma_prev = hma_series.iloc[-2]
+            if hma_val > hma_prev: bull_confluences += 1; signal_details_pine['HMA'] = "▲"
+            elif hma_val < hma_prev: bear_confluences += 1; signal_details_pine['HMA'] = "▼"
+            else: signal_details_pine['HMA'] = "─"
+        else: signal_details_pine['HMA'] = "N/A"
+    except Exception as e: signal_details_pine['HMA'] = "ErrHMA"; print(f"Erreur HMA: {e}")
+    try: rsi_series = rsi_pine(ohlc4, 10)
+        if len(rsi_series) >=1 and not pd.isna(rsi_series.iloc[-1]):
+            rsi_val = rsi_series.iloc[-1]; signal_details_pine['RSI_val'] = f"{rsi_val:.0f}"
+            if rsi_val > 50: bull_confluences += 1; signal_details_pine['RSI'] = f"▲({rsi_val:.0f})"
+            elif rsi_val < 50: bear_confluences += 1; signal_details_pine['RSI'] = f"▼({rsi_val:.0f})"
+            else: signal_details_pine['RSI'] = f"─({rsi_val:.0f})"
+        else: signal_details_pine['RSI'] = "N/A"
+    except Exception as e: signal_details_pine['RSI'] = "ErrRSI"; signal_details_pine['RSI_val'] = "N/A"; print(f"Erreur RSI: {e}")
+    try: adx_series = adx_pine(high, low, close, 14)
+        if len(adx_series) >= 1 and not pd.isna(adx_series.iloc[-1]):
+            adx_val = adx_series.iloc[-1]; signal_details_pine['ADX_val'] = f"{adx_val:.0f}"
+            if adx_val >= 20: bull_confluences += 1; bear_confluences += 1; signal_details_pine['ADX'] = f"✔({adx_val:.0f})"
+            else: signal_details_pine['ADX'] = f"✖({adx_val:.0f})"
+        else: signal_details_pine['ADX'] = "N/A"
+    except Exception as e: signal_details_pine['ADX'] = "ErrADX"; signal_details_pine['ADX_val'] = "N/A"; print(f"Erreur ADX: {e}")
+    try: ha_open, ha_close = heiken_ashi_pine(data)
+        if len(ha_open) >=1 and len(ha_close) >=1 and not pd.isna(ha_open.iloc[-1]) and not pd.isna(ha_close.iloc[-1]):
+            if ha_close.iloc[-1] > ha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['HA'] = "▲"
+            elif ha_close.iloc[-1] < ha_open.iloc[-1]: bear_confluences += 1; signal_details_pine['HA'] = "▼"
+            else: signal_details_pine['HA'] = "─"
+        else: signal_details_pine['HA'] = "N/A"
+    except Exception as e: signal_details_pine['HA'] = "ErrHA"; print(f"Erreur HA: {e}")
+    try: sha_open, sha_close = smoothed_heiken_ashi_pine(data, 10, 10)
+        if len(sha_open) >=1 and len(sha_close) >=1 and not pd.isna(sha_open.iloc[-1]) and not pd.isna(sha_close.iloc[-1]):
+            if sha_close.iloc[-1] > sha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['SHA'] = "▲"
+            elif sha_close.iloc[-1] < sha_open.iloc[-1]: bear_confluences += 1; signal_details_pine['SHA'] = "▼"
+            else: signal_details_pine['SHA'] = "─"
+        else: signal_details_pine['SHA'] = "N/A"
+    except Exception as e: signal_details_pine['SHA'] = "ErrSHA"; print(f"Erreur SHA: {e}")
+    try: ichimoku_signal_val = ichimoku_pine_signal(high, low, close)
+        if ichimoku_signal_val == 1: bull_confluences += 1; signal_details_pine['Ichi'] = "▲"
+        elif ichimoku_signal_val == -1: bear_confluences += 1; signal_details_pine['Ichi'] = "▼"
+        elif ichimoku_signal_val == 0 and (len(data) < max(9,26,52) or (len(data) > 0 and pd.isna(data['Close'].iloc[-1]))): signal_details_pine['Ichi'] = "N/D"
+        else: signal_details_pine['Ichi'] = "─"
+    except Exception as e: signal_details_pine['Ichi'] = "ErrIchi"; print(f"Erreur Ichi: {e}")
+    confluence_value=max(bull_confluences,bear_confluences); direction="NEUTRE"
+    if bull_confluences > bear_confluences: direction="HAUSSIER"
+    elif bear_confluences > bull_confluences: direction="BAISSIER"
+    elif bull_confluences == bear_confluences and bull_confluences > 0: direction="CONFLIT"
+    return{'confluence_P':confluence_value,'direction_P':direction,'bull_P':bull_confluences,'bear_P':bear_confluences,'rsi_P':signal_details_pine.get('RSI_val',"N/A"),'adx_P':signal_details_pine.get('ADX_val',"N/A"),'signals_P':signal_details_pine}
 
-def get_stars(confluence):
-    """Convertit confluence en étoiles"""
-    stars_map = {
-        6: "⭐⭐⭐⭐⭐⭐",
-        5: "⭐⭐⭐⭐⭐", 
-        4: "⭐⭐⭐⭐",
-        3: "⭐⭐⭐",
-        2: "⭐⭐",
-        1: "⭐"
-    }
-    return stars_map.get(confluence, "ATTENDRE")
+def get_stars_pine(confluence_value):
+    if confluence_value == 6: return "⭐⭐⭐⭐⭐⭐"; elif confluence_value == 5: return "⭐⭐⭐⭐⭐"; 
+    elif confluence_value == 4: return "⭐⭐⭐⭐"; elif confluence_value == 3: return "⭐⭐⭐"; 
+    elif confluence_value == 2: return "⭐⭐"; elif confluence_value == 1: return "⭐"; else: return "WAIT"
 
-# Interface utilisateur
-col1, col2 = st.columns([1, 3])
-
-with col1:
-    st.subheader("⚙️ Paramètres")
-    
-    min_confluence = st.selectbox(
-        "Confluence minimum",
-        options=[0, 1, 2, 3, 4, 5, 6],
-        index=3,
-        format_func=lambda x: f"{x} étoile{'s' if x != 1 else ''}"
-    )
-    
-    show_all = st.checkbox("Afficher toutes les paires")
-    
-    scan_button = st.button(
-        "🔍 Lancer le Scan",
-        type="primary",
-        use_container_width=True,
-        disabled=not TWELVEDATA_API_KEY
-    )
-
-with col2:
-    if scan_button and TWELVEDATA_API_KEY:
-        st.info("🔄 Scan en cours...")
-        
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        total = len(FOREX_PAIRS)
-        
-        for i, pair in enumerate(FOREX_PAIRS):
-            progress = (i + 1) / total
-            progress_bar.progress(progress)
-            status_text.text(f"Analyse: {pair} ({i+1}/{total})")
-            
-            # Récupération des données
-            data = fetch_twelvedata(pair)
-            
-            if data is not None:
-                # Analyse des signaux
-                analysis = analyze_signals(data)
-                
-                if analysis:
-                    results.append({
-                        'Paire': pair,
-                        'Direction': analysis['direction'],
-                        'Confluence': analysis['confluence'], 
-                        'Étoiles': get_stars(analysis['confluence']),
-                        'RSI': analysis['rsi_val'],
-                        'ADX': analysis['adx_val'],
-                        'Bulls': analysis['bulls'],
-                        'Bears': analysis['bears'],
-                        'Détails': analysis['signals']
-                    })
-                else:
-                    results.append({
-                        'Paire': pair,
-                        'Direction': 'ERREUR',
-                        'Confluence': 0,
-                        'Étoiles': 'N/A',
-                        'RSI': 'N/A', 
-                        'ADX': 'N/A',
-                        'Bulls': 0,
-                        'Bears': 0,
-                        'Détails': {}
-                    })
-            else:
-                results.append({
-                    'Paire': pair,
-                    'Direction': 'PAS DE DONNÉES',
-                    'Confluence': 0,
-                    'Étoiles': 'N/A',
-                    'RSI': 'N/A',
-                    'ADX': 'N/A', 
-                    'Bulls': 0,
-                    'Bears': 0,
-                    'Détails': {}
-                })
-            
-            # Pause pour respecter les limites API
-            if i < total - 1:
-                time.sleep(8)
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        # Affichage des résultats
-        if results:
-            df = pd.DataFrame(results)
-            
-            # Filtrage
-            if show_all:
-                df_filtered = df.copy()
-                st.info(f"📊 Affichage de toutes les {len(df_filtered)} paires")
-            else:
-                df_filtered = df[df['Confluence'] >= min_confluence].copy()
-                st.success(f"🎯 {len(df_filtered)} paire(s) avec confluence >= {min_confluence}")
-            
-            if not df_filtered.empty:
-                # Tri par confluence
-                df_sorted = df_filtered.sort_values('Confluence', ascending=False)
-                
-                # Tableau principal
-                display_cols = ['Paire', 'Direction', 'Confluence', 'Étoiles', 'RSI', 'ADX', 'Bulls', 'Bears']
-                st.dataframe(df_sorted[display_cols], use_container_width=True, hide_index=True)
-                
-                # Détails
-                with st.expander("📊 Détails des signaux"):
-                    for _, row in df_sorted.iterrows():
-                        details = row.get('Détails', {})
-                        
-                        st.write(f"**{row['Paire']}** - {row['Étoiles']} ({row['Confluence']}) - {row['Direction']}")
-                        
-                        cols = st.columns(6)
-                        indicators = ['HMA', 'RSI', 'ADX', 'HA', 'SHA', 'Ichi']
-                        
-                        for idx, indicator in enumerate(indicators):
-                            cols[idx].metric(
-                                label=indicator,
-                                value=details.get(indicator, "N/A")
-                            )
-                        
+col1,col2=st.columns([1,3])
+with col1: # Paramètres
+    st.subheader("⚙️ Paramètres");min_conf=st.selectbox("Confluence minimum",(0,1,2,3,4,5,6),index=3,format_func=lambda x:f"{x} étoiles")
+    show_all=st.checkbox("Afficher toutes les paires", True); scan_dis_td=TWELVEDATA_API_KEY is None; 
+    scan_tip_td="Clé TwelveData non configurée." if scan_dis_td else "Scanner les paires Forex"
+    scan_btn=st.button("🔍 Lancer le Scan",type="primary",use_container_width=True,disabled=scan_dis_td,help=scan_tip_td)
+with col2: # Résultats
+    if scan_btn and TWELVEDATA_API_KEY: # S'assurer que la clé est là avant de scanner
+        st.info("🔄 Scan en cours..."); pr_res=[]; pb=st.progress(0); stx=st.empty()
+        total_pairs = len(FOREX_PAIRS_TWELVEDATA)
+        for i,pair_symbol in enumerate(FOREX_PAIRS_TWELVEDATA): 
+            pnd=pair_symbol; cp=(i+1)/total_pairs; pb.progress(cp); stx.text(f"Analyse: {pnd} ({i+1}/{total_pairs})")
+            d_h1_td=get_data_twelvedata(pair_symbol,interval_td="1h",outputsize_td=300) 
+            if d_h1_td is not None and not d_h1_td.empty:
+                sigs=calculate_all_signals_pine(d_h1_td)
+                if sigs:strs=get_stars_pine(sigs['confluence_P']);rd={'Paire':pnd,'Direction':sigs['direction_P'],'Conf. (0-6)':sigs['confluence_P'],'Étoiles':strs,'RSI':sigs['rsi_P'],'ADX':sigs['adx_P'],'Bull':sigs['bull_P'],'Bear':sigs['bear_P'],'details':sigs['signals_P']};pr_res.append(rd)
+                else:pr_res.append({'Paire':pnd,'Direction':'ERR CALC','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Calcul échoué (TD)'}})
+            else:pr_res.append({'Paire':pnd,'Direction':'ERR DATA','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Données TD non dispo (logs)'}})
+            if i < total_pairs - 1 : print(f"Pause 8s pour limite TD..."); time.sleep(8) 
+        pb.empty();stx.empty()
+        if pr_res:
+            dfa=pd.DataFrame(pr_res);dfd=dfa[dfa['Conf. (0-6)']>=min_conf].copy()if not show_all else dfa.copy()
+            if not show_all:st.success(f"🎯 {len(dfd)} paire(s) avec {min_conf}+ confluence (TD).")
+            else:st.info(f"🔍 Affichage {len(dfd)} paires (TD).")
+            if not dfd.empty:
+                dfds=dfd.sort_values('Conf. (0-6)',ascending=False);vcs=[c for c in['Paire','Direction','Conf. (0-6)','Étoiles','RSI','ADX','Bull','Bear']if c in dfds.columns]
+                st.dataframe(dfds[vcs],use_container_width=True,hide_index=True)
+                with st.expander("📊 Détails des signaux (TD)"):
+                    for _,r in dfds.iterrows():
+                        sm=r.get('details',{});
+                        if not isinstance(sm,dict):sm={'Info':'Détails non dispo'}
+                        st.write(f"**{r.get('Paire','N/A')}** - {r.get('Étoiles','N/A')} ({r.get('Conf. (0-6)','N/A')}) - Dir: {r.get('Direction','N/A')}")
+                        dc=st.columns(6);so=['HMA','RSI','ADX','HA','SHA','Ichi']
+                        for idx,sk in enumerate(so):dc[idx].metric(label=sk,value=sm.get(sk,"N/P"))
                         st.divider()
-            else:
-                st.warning("❌ Aucune paire ne correspond aux critères")
-        else:
-            st.error("❌ Aucun résultat obtenu")
-
-# Informations
+            else:st.warning(f"❌ Aucune paire avec critères (TD). Vérifiez erreurs.")
+        else:st.error("❌ Aucune paire traitée (TD). Vérifiez logs serveur.")
 with st.expander("ℹ️ Informations"):
-    st.markdown("""
-    **Signaux analysés:**
-    - **HMA(20)**: Hull Moving Average - Tendance
-    - **RSI(10)**: Relative Strength Index - Momentum  
-    - **ADX(14)**: Average Directional Index - Force de tendance
-    - **HA**: Heiken Ashi - Filtrage du bruit
-    - **SHA**: Smoothed Heiken Ashi - Tendance lissée
-    - **Ichimoku**: Position par rapport au nuage
-    
-    **Confluence:** Nombre maximum de signaux dans la même direction
-    
-    **Source:** TwelveData API (données H1)
-    """)
-
-st.caption("⚠️ Respectez les limites de l'API TwelveData (120 requêtes/minute)")
- 
+    st.markdown("""**Signaux:** HMA(20),RSI(10),ADX(14)>=20,HA,SHA(10,10),Ichi(9,26,52). **Source:** TwelveData API.""")
+st.caption("Scanner H1 (TwelveData). Respectez limites API.")
+   
