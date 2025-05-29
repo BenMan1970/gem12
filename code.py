@@ -110,7 +110,7 @@ def heiken_ashi_pine(dfo):
     try:
         if len(dfo.dropna()) < 1:
             return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
-        # Compute HA_Close as a Series directly
+        # Compute HA_Close and HA_Open as Series directly
         ha_close = (dfo['Open'] + dfo['High'] + dfo['Low'] + dfo['Close']) / 4
         ha_open = pd.Series(np.nan, index=dfo.index)
         if len(dfo) > 0:
@@ -182,6 +182,7 @@ def get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300):
         if not all(col in df.columns for col in required_cols):
             st.warning(f"Données incomplètes pour {pair_symbol}. Colonnes manquantes.")
             return None
+        # Convert to numeric and debug
         for col in ["open", "high", "low", "close"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["datetime"] = pd.to_datetime(df["datetime"])
@@ -190,8 +191,10 @@ def get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300):
         if df.empty or df["Close"].isna().all():
             st.warning(f"Données vides ou invalides pour {pair_symbol}.")
             return None
-        # Debug: Check data types after conversion
+        # Debug: Check data types and sample data
         st.write(f"Types de données pour {pair_symbol}: {df.dtypes}")
+        st.write(f"Échantillon de données pour {pair_symbol}:")
+        st.write(df.head())
         return df
     except requests.exceptions.RequestException as e:
         st.warning(f"Erreur réseau pour {pair_symbol}: {e}")
@@ -214,7 +217,6 @@ def calculate_all_signals_pine(data):
     try:
         hma_series = hull_ma_pine(close, 20)
         if len(hma_series) >= 2 and not hma_series.iloc[-2:].isna().any():
-           nts = 0
             hma_val = hma_series.iloc[-1]
             hma_prev = hma_series.iloc[-2]
             if hma_val > hma_prev:
@@ -276,7 +278,6 @@ def calculate_all_signals_pine(data):
         ha_open, ha_close = heiken_ashi_pine(data)
         if len(ha_open) >= 1 and len(ha_close) >= 1 and not pd.isna(ha_open.iloc[-1]) and not pd.isna(ha_close.iloc[-1]):
             if ha_close.iloc[-1] > ha_open.iloc[-1]:
-                bullconde = 0
                 bull_confluences += 1
                 signal_details_pine['HA'] = "▲"
             elif ha_close.iloc[-1] < ha_open.iloc[-1]:
@@ -305,7 +306,7 @@ def calculate_all_signals_pine(data):
         else:
             signal_details_pine['SHA'] = "N/A"
     except Exception as e:
-        signal_details袋['SHA'] = "ErrSHA"
+        signal_details_pine['SHA'] = "ErrSHA"
         st.error(f"Erreur SHA: {e}")
 
     # Ichimoku
@@ -378,7 +379,7 @@ with col2:
             if d_h1_td is None or d_h1_td.empty:
                 pr_res.append({
                     'Paire': pnd, 'Direction': 'ERR DATA', 'Conf. (0-6)': 0,
-                    'Étoiles': venuta'A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
+                    'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
                     'details': {'Info': 'Données TwelveData non disponibles'}
                 })
                 continue
@@ -411,7 +412,7 @@ with col2:
             dfa = pd.DataFrame(pr_res)
             dfd = dfa[dfa['Conf. (0-6)'] >= min_conf].copy() if not show_all else dfa.copy()
             if not show_all:
-                st.success(f"🎯 {len(dfd)} paire(s) avec {min_conf}+ confluence.")
+                st.success(f"�LLU {len(dfd)} paire(s) avec {min_conf}+ confluence.")
             else:
                 st.info(f"🔍 Affichage {len(dfd)} paires.")
             if not dfd.empty:
@@ -439,4 +440,3 @@ with col2:
 with st.expander("ℹ️ Informations"):
     st.markdown("""**Signaux:** HMA(20), RSI(10), ADX(14)>=20, HA, SHA(10,10), Ichi(9,26,52). **Source:** TwelveData API.""")
     st.caption("Scanner H1 (TwelveData). Respectez les limites de l'API gratuite (8 req/min).")
-       
