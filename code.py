@@ -10,11 +10,11 @@ st.set_page_config(page_title="Scanner Confluence Forex (Twelve Data)", page_ico
 st.title("🔍 Scanner Confluence Forex Premium (Données Twelve Data)")
 st.markdown("*Utilisation de l'API Twelve Data pour les données de marché H1*")
 
-# Forex pairs in Twelve Data format
+# Forex pairs in Twelve Data format with alternatives
 FOREX_PAIRS_TD = [
     'EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF',
     'AUD/USD', 'USD/CAD', 'NZD/USD', 'EUR/JPY',
-    'GBP/JPY', 'EUR/GBP'
+    'USD/ZAR', 'USD/SGD'  # Replaced GBP/JPY and EUR/GBP with available pairs
 ]
 
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
@@ -55,7 +55,7 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
     return sig
 
 @st.cache_data(ttl=300)
-def get_data_twelve(symbol_td: str, interval_td: str = '1h', period_days: int = 30):
+def get_data_twelve(symbol_td: str, interval_td: str = '4h', period_days: int = 15):
     print(f"\n--- Début get_data_twelve: sym='{symbol_td}', interval='{interval_td}', period='{period_days}d' ---")
     try:
         api_key = st.secrets.get("TWELVE_DATA_API_KEY", None)
@@ -79,7 +79,7 @@ def get_data_twelve(symbol_td: str, interval_td: str = '1h', period_days: int = 
         
         data = response.json()
         if data.get('status') != 'ok' or not data.get('values'):
-            st.warning(f"Twelve Data: Données insuffisantes ou vides pour {symbol_td}.")
+            st.warning(f"Twelve Data: Données insuffisantes ou vides pour {symbol_td}. Réponse: {data}")
             print(f"Twelve Data: Données insuffisantes ou vides pour {symbol_td}. Réponse: {data}")
             return None
 
@@ -91,7 +91,7 @@ def get_data_twelve(symbol_td: str, interval_td: str = '1h', period_days: int = 
         df.columns = ['Open', 'High', 'Low', 'Close']  # Match yfinance column names
         df = df.sort_index()  # Ensure chronological order
 
-        if len(df) < 100:
+        if len(df) < 50:  # Reduced from 100 to 50
             st.warning(f"Twelve Data: Données insuffisantes pour {symbol_td} ({len(df)} barres).")
             print(f"Twelve Data: Données insuffisantes pour {symbol_td} ({len(df)} barres).")
             return None
@@ -271,13 +271,13 @@ with col2:
         st.info(f"🔄 Scan en cours (Twelve Data H1)...");pr_res=[];pb=st.progress(0);stx=st.empty()
         if pair_to_debug != "Aucune":
             st.subheader(f"Données OHLC pour {pair_to_debug} (Twelve Data):")
-            debug_data = get_data_twelve(pair_to_debug, interval_td="1h", period_days=5)
+            debug_data = get_data_twelve(pair_to_debug, interval_td="4h", period_days=5)
             if debug_data is not None: st.dataframe(debug_data[['Open','High','Low','Close']].tail(10))
             else: st.warning(f"N'a pas pu charger données de débogage pour {pair_to_debug}.")
             st.divider()
         for i,symbol_td_scan in enumerate(FOREX_PAIRS_TD):
             pnd=symbol_td_scan.replace('/','');cp=(i+1)/len(FOREX_PAIRS_TD);pb.progress(cp);stx.text(f"Analyse (Twelve Data H1):{pnd}({i+1}/{len(FOREX_PAIRS_TD)})")
-            d_h1_td=get_data_twelve(symbol_td_scan, interval_td="1h", period_days=30)
+            d_h1_td=get_data_twelve(symbol_td_scan, interval_td="4h", period_days=15)
             if d_h1_td is not None:
                 sigs=calculate_all_signals_pine(d_h1_td)
                 if sigs:strs=get_stars_pine(sigs['confluence_P']);rd={'Paire':pnd,'Direction':sigs['direction_P'],'Conf. (0-6)':sigs['confluence_P'],'Étoiles':strs,'RSI':sigs['rsi_P'],'ADX':sigs['adx_P'],'Bull':sigs['bull_P'],'Bear':sigs['bear_P'],'details':sigs['signals_P']};pr_res.append(rd)
