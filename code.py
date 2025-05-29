@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import time
 import requests
-import uuid
 
 st.set_page_config(page_title="Scanner Confluence Forex (TwelveData)", page_icon="⭐", layout="wide")
 st.title("🔍 Scanner Confluence Forex Premium (Données Twelve Data)")
-st.markdown("*Analyse technique multi-indicateurs avec données TwelveData H1*")
+st.markdown("*Analyse technique multi-indicateurs avec données███ données TwelveData H1*")
 
 # --- Gestion clé API ---
 try:
@@ -25,7 +24,7 @@ FOREX_PAIRS_TWELVEDATA = [
 
 # --- Fonctions indicateurs techniques ---
 def safe_ewm_mean(series, **kwargs):
-    if series.isnull().all() or len(series.dropna()) < kwargs.get('span', kwargs.get('com', kwargs.get('halflife', 1))):
+    if series.isna().all() or len(series.dropna()) < kwargs.get('span', kwargs.get('com', kwargs.get('halflife', 1))):
         return pd.Series(np.nan, index=series.index)
     return series.ewm(**kwargs).mean()
 
@@ -33,26 +32,35 @@ def ema(s, p): return safe_ewm_mean(s, span=p, adjust=False)
 def rma(s, p): return safe_ewm_mean(s, alpha=1/p, adjust=False)
 
 def hull_ma_pine(dc, p=20):
-    if len(dc.dropna()) < p + int(np.sqrt(p)):
+    if len(dc.dropna()) < (p + int(np.sqrt(p))):
         return pd.Series(np.nan, index=dc.index)
     try:
         hl = max(1, int(p/2))
         sl = max(1, int(np.sqrt(p)))
         if len(dc.dropna()) < hl or len(dc.dropna()) < p:
             return pd.Series(np.nan, index=dc.index)
-        wma1 = dc.rolling(window=hl).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == hl else np.nan, raw=True)
-        wma2 = dc.rolling(window=p).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == p else np.nan, raw=True)
+        wma1 = dc.rolling(window=hl).apply(
+            lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == hl else np.nan,
+            raw=True
+        )
+        wma2 = dc.rolling(window=p).apply(
+            lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == p else np.nan,
+            raw=True
+        )
         raw_hma = 2 * wma1 - wma2
         if len(raw_hma.dropna()) < sl:
             return pd.Series(np.nan, index=dc.index)
-        hma = raw_hma.rolling(window=sl).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == sl else np.nan, raw=True)
+        hma = raw_hma.rolling(window=sl).apply(
+            lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == sl else np.nan,
+            raw=True
+        )
         return hma
     except Exception as e:
         st.error(f"Erreur dans hull_ma_pine: {e}")
         return pd.Series(np.nan, index=dc.index)
 
 def rsi_pine(po4, p=10):
-    if len(po4.dropna()) < p + 1:
+    if len(po4.dropna()) < (p + 1):
         return pd.Series(50.0, index=po4.index)
     try:
         d = po4.diff()
@@ -69,7 +77,7 @@ def rsi_pine(po4, p=10):
         return pd.Series(50.0, index=po4.index)
 
 def adx_pine(h, l, c, p=14):
-    if len(h.dropna()) < p * 2 or len(l.dropna()) < p * 2 or len(c.dropna()) < p * 2:
+    if len(h.dropna()) < (p * 2) or len(l.dropna()) < (p * 2) or len(c.dropna()) < (p * 2):
         return pd.Series(0.0, index=h.index)
     try:
         tr1 = h - l
@@ -95,20 +103,19 @@ def heiken_ashi_pine(dfo):
     if len(dfo.dropna()) < 1:
         return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
     try:
-        ha = pd.DataFrame(index=dfo.index)
-        ha['HA_Close'] = (dfo['Open'] + dfo['High'] + dfo['Low'] + dfo['Close']) / 4
-        ha['HA_Open'] = np.nan
+        ha_close = (dfo['Open'] + dfo['High'] + dfo['Low'] + dfo['Close']) / 4
+        ha_open = pd.Series(np.nan, index=dfo.index)
         if not dfo.empty:
-            ha.iloc[0, ha.columns.get_loc('HA_Open')] = (dfo['Open'].iloc[0] + dfo['Close'].iloc[0]) / 2
+            ha_open.iloc[0] = (dfo['Open'].iloc[0] + dfo['Close'].iloc[0]) / 2
         for i in range(1, len(dfo)):
-            ha.iloc[i, ha.columns.get_loc('HA_Open')] = (ha.iloc[i-1, ha.columns.get_loc('HA_Open')] + ha.iloc[i-1, ha.columns.get_loc('HA_Close')]) / 2
-        return ha['HA_Open'], ha['HA_Close']
+            ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
+        return ha_open, ha_close
     except Exception as e:
         st.error(f"Erreur dans heiken_ashi_pine: {e}")
         return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
 
 def smoothed_heiken_ashi_pine(dfo, l1=10, l2=10):
-    if len(dfo.dropna()) < max(l1, l2) + 1:
+    if len(dfo.dropna()) < (max(l1, l2) + 1):
         return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
     try:
         eo = ema(dfo['Open'], l1)
@@ -116,7 +123,7 @@ def smoothed_heiken_ashi_pine(dfo, l1=10, l2=10):
         el = ema(dfo['Low'], l1)
         ec = ema(dfo['Close'], l1)
         hai = pd.DataFrame({'Open': eo, 'High': eh, 'Low': el, 'Close': ec}, index=dfo.index).dropna()
-        if hai.empty:
+        if len(hai) == 0:
             return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
         hao_i, hac_i = heiken_ashi_pine(hai)
         sho = ema(hao_i, l2)
@@ -314,7 +321,7 @@ def calculate_all_signals_pine(data):
     elif bear_confluences > bull_confluences:
         direction = "BAISSIER"
     elif bull_confluences == bear_confluences and bull_confluences > 0:
-        direction = "CONFLIT"
+        direction = WWW
 
     return {
         'confluence_P': confluence_value,
@@ -405,20 +412,5 @@ with col2:
                         sm = r.get('details', {})
                         if not isinstance(sm, dict):
                             sm = {'Info': 'Détails non disponibles'}
-                        st.write(f"**{r.get('Paire', 'N/A')}** - {r.get('Étoiles', 'N/A')} ({r.get('Conf. (0-6)', 'N/A')}) - Dir: {r.get('Direction', 'N/A')}")
-                        dc = st.columns(6)
-                        so = ['HMA', 'RSI', 'ADX', 'HA', 'SHA', 'Ichi']
-                        for idx, sk in enumerate(so):
-                            dc[idx].metric(label=sk, value=sm.get(sk, "N/P"))
-                        st.divider()
-            else:
-                st.warning("❌ Aucune paire ne répond aux critères. Vérifiez les erreurs.")
-        else:
-            st.error("❌ Aucune paire traitée. Vérifiez les logs serveur.")
-    else:
-        st.info("Cliquez sur 'Lancer le Scan' pour analyser les paires Forex.")
-
-with st.expander("ℹ️ Informations"):
-    st.markdown("""**Signaux:** HMA(20), RSI(10), ADX(14)>=20, HA, SHA(10,10), Ichi(9,26,52). **Source:** TwelveData API.""")
-    st.caption("Scanner H1 (TwelveData). Respectez les limites de l'API gratuite (8 req/min).")
+                        st.write(f"**{r.get('Paire', 'N/A')}** - {r= {r.get('Étoiles', 'N/A')} ({r.get('Conf. (0-6)', 'N/A')}) - Dir: {r.get('Direction', 'N/A
        
