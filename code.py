@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import time
 import requests
+import uuid
 
 st.set_page_config(page_title="Scanner Confluence Forex (TwelveData)", page_icon="⭐", layout="wide")
 st.title("🔍 Scanner Confluence Forex Premium (Données Twelve Data)")
@@ -10,16 +11,11 @@ st.markdown("*Analyse technique multi-indicateurs avec données TwelveData H1*")
 
 # --- Gestion clé API ---
 try:
-    TWELVEDATA_API_KEY = st.secrets.get("TWELVEDATA_API_KEY")
-    if TWELVEDATA_API_KEY:
-        st.sidebar.success("✅ Clé API TwelveData chargée")
-    else:
-        st.sidebar.error("❌ Clé API TwelveData manquante dans les secrets.")
-        st.error("**Configuration requise:** Ajoutez TWELVEDATA_API_KEY dans les secrets Streamlit.")
-        st.stop()
+    TWELVEDATA_API_KEY = st.secrets["TWELVEDATA_API_KEY"]
+    st.sidebar.success("✅ Clé API TwelveData chargée")
 except Exception as e:
-    st.sidebar.error("❌ Erreur de configuration des secrets.")
-    st.error(f"Vérifiez la configuration des secrets Streamlit: {e}")
+    st.sidebar.error("❌ Clé API TwelveData manquante ou mal configurée.")
+    st.error(f"**Configuration requise:** Ajoutez TWELVEDATA_API_KEY dans les secrets Streamlit. Erreur: {e}")
     st.stop()
 
 FOREX_PAIRS_TWELVEDATA = [
@@ -44,15 +40,15 @@ def hull_ma_pine(dc, p=20):
         sl = max(1, int(np.sqrt(p)))
         if len(dc.dropna()) < hl or len(dc.dropna()) < p:
             return pd.Series(np.nan, index=dc.index)
-        wma1 = dc.rolling(window=hl).apply(lambda x:np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1)) if len(x)==hl else np.nan, raw=True)
-        wma2 = dc.rolling(window=p).apply(lambda x:np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1)) if len(x)==p else np.nan, raw=True)
-        raw_hma = 2*wma1 - wma2
+        wma1 = dc.rolling(window=hl).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == hl else np.nan, raw=True)
+        wma2 = dc.rolling(window=p).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == p else np.nan, raw=True)
+        raw_hma = 2 * wma1 - wma2
         if len(raw_hma.dropna()) < sl:
             return pd.Series(np.nan, index=dc.index)
-        hma = raw_hma.rolling(window=sl).apply(lambda x:np.sum(x*np.arange(1,len(x)+1))/np.sum(np.arange(1,len(x)+1)) if len(x)==sl else np.nan, raw=True)
+        hma = raw_hma.rolling(window=sl).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)) if len(x) == sl else np.nan, raw=True)
         return hma
     except Exception as e:
-        print(f"Erreur dans hull_ma_pine: {e}")
+        st.error(f"Erreur dans hull_ma_pine: {e}")
         return pd.Series(np.nan, index=dc.index)
 
 def rsi_pine(po4, p=10):
@@ -60,20 +56,20 @@ def rsi_pine(po4, p=10):
         return pd.Series(50.0, index=po4.index)
     try:
         d = po4.diff()
-        g = d.where(d>0, 0.0)
-        l = -d.where(d<0, 0.0)
+        g = d.where(d > 0, 0.0)
+        l = -d.where(d < 0, 0.0)
         ag = rma(g, p)
         al = rma(l, p)
         al_safe = al.replace(0, 1e-9)
         rs = ag / al_safe
-        rsi = 100 - (100/(1 + rs))
+        rsi = 100 - (100 / (1 + rs))
         return rsi.fillna(50)
     except Exception as e:
-        print(f"Erreur dans rsi_pine: {e}")
+        st.error(f"Erreur dans rsi_pine: {e}")
         return pd.Series(50.0, index=po4.index)
 
 def adx_pine(h, l, c, p=14):
-    if len(h.dropna()) < p*2 or len(l.dropna()) < p*2 or len(c.dropna()) < p*2:
+    if len(h.dropna()) < p * 2 or len(l.dropna()) < p * 2 or len(c.dropna()) < p * 2:
         return pd.Series(0.0, index=h.index)
     try:
         tr1 = h - l
@@ -83,8 +79,8 @@ def adx_pine(h, l, c, p=14):
         atr = rma(tr, p)
         um = h.diff()
         dm = l.shift(1) - l
-        pdm = pd.Series(np.where((um>dm)&(um>0), um, 0.0), index=h.index)
-        mdm = pd.Series(np.where((dm>um)&(dm>0), dm, 0.0), index=h.index)
+        pdm = pd.Series(np.where((um > dm) & (um > 0), um, 0.0), index=h.index)
+        mdm = pd.Series(np.where((dm > um) & (dm > 0), dm, 0.0), index=h.index)
         satr = atr.replace(0, 1e-9)
         pdi = 100 * (rma(pdm, p) / satr)
         mdi = 100 * (rma(mdm, p) / satr)
@@ -92,7 +88,7 @@ def adx_pine(h, l, c, p=14):
         dx = 100 * (abs(pdi - mdi) / dxden)
         return rma(dx, p).fillna(0)
     except Exception as e:
-        print(f"Erreur dans adx_pine: {e}")
+        st.error(f"Erreur dans adx_pine: {e}")
         return pd.Series(0.0, index=h.index)
 
 def heiken_ashi_pine(dfo):
@@ -108,7 +104,7 @@ def heiken_ashi_pine(dfo):
             ha.iloc[i, ha.columns.get_loc('HA_Open')] = (ha.iloc[i-1, ha.columns.get_loc('HA_Open')] + ha.iloc[i-1, ha.columns.get_loc('HA_Close')]) / 2
         return ha['HA_Open'], ha['HA_Close']
     except Exception as e:
-        print(f"Erreur dans heiken_ashi_pine: {e}")
+        st.error(f"Erreur dans heiken_ashi_pine: {e}")
         return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
 
 def smoothed_heiken_ashi_pine(dfo, l1=10, l2=10):
@@ -127,7 +123,7 @@ def smoothed_heiken_ashi_pine(dfo, l1=10, l2=10):
         shc = ema(hac_i, l2)
         return sho, shc
     except Exception as e:
-        print(f"Erreur dans smoothed_heiken_ashi_pine: {e}")
+        st.error(f"Erreur dans smoothed_heiken_ashi_pine: {e}")
         return pd.Series(dtype=float, index=dfo.index), pd.Series(dtype=float, index=dfo.index)
 
 def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senkou_b_p=52):
@@ -144,34 +140,48 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
         else:
             return 0
     except Exception as e:
-        print(f"Erreur dans ichimoku_pine_signal: {e}")
+        st.error(f"Erreur dans ichimoku_pine_signal: {e}")
         return 0
 
 # --- Fonction de récupération des données Twelve Data ---
+@st.cache_data(ttl=300)
 def get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300):
     try:
         url = (
             f"https://api.twelvedata.com/time_series?"
-            f"symbol={pair_symbol}&interval={interval_td}&outputsize={outputsize_td}&apikey={TWELVEDATA_API_KEY}&format=JSON"
+            f"symbol={pair_symbol}&interval={interval_td}&outputsize={outputsize_td}&apikey={TWELVEDATA_API_KEY}"
         )
         resp = requests.get(url, timeout=10)
+        if resp.status_code == 429:
+            st.warning(f"⚠️ Limite de requêtes atteinte pour {pair_symbol}. Attendez et réessayez.")
+            return None
+        resp.raise_for_status()
         data = resp.json()
-        if "values" not in data:
+        if data.get("status") == "error":
             st.warning(f"Erreur TwelveData pour {pair_symbol}: {data.get('message', 'Aucune donnée reçue')}")
-            print(f"Erreur TwelveData: {data}")
+            return None
+        if "values" not in data or not data["values"]:
+            st.warning(f"Aucune donnée pour {pair_symbol}. Vérifiez le symbole ou la disponibilité.")
             return None
         df = pd.DataFrame(data["values"])
+        required_cols = ["open", "high", "low", "close", "datetime"]
+        if not all(col in df.columns for col in required_cols):
+            st.warning(f"Données incomplètes pour {pair_symbol}. Colonnes manquantes.")
+            return None
         for col in ["open", "high", "low", "close"]:
-            df[col.capitalize()] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce")
         df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.rename(columns={
-            "open": "Open", "high": "High", "low": "Low", "close": "Close"
-        })
-        df = df.sort_values("datetime").reset_index(drop=True)
-        return df[["datetime", "Open", "High", "Low", "Close"]]
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+        df = df[["datetime", "Open", "High", "Low", "Close"]].sort_values("datetime").reset_index(drop=True)
+        if df.empty or df["Close"].isna().all():
+            st.warning(f"Données vides ou invalides pour {pair_symbol}.")
+            return None
+        return df
+    except requests.exceptions.RequestException as e:
+        st.warning(f"Erreur réseau pour {pair_symbol}: {e}")
+        return None
     except Exception as e:
-        st.warning(f"Erreur lors du fetch TwelveData pour {pair_symbol}: {e}")
-        print(f"Erreur lors du fetch TwelveData pour {pair_symbol}: {e}")
+        st.warning(f"Erreur inattendue pour {pair_symbol}: {e}")
         return None
 
 # --- Calcul multi-indicateurs Pine ---
@@ -202,7 +212,7 @@ def calculate_all_signals_pine(data):
             signal_details_pine['HMA'] = "N/A"
     except Exception as e:
         signal_details_pine['HMA'] = "ErrHMA"
-        print(f"Erreur HMA: {e}")
+        st.error(f"Erreur HMA: {e}")
 
     # RSI
     try:
@@ -223,7 +233,7 @@ def calculate_all_signals_pine(data):
     except Exception as e:
         signal_details_pine['RSI'] = "ErrRSI"
         signal_details_pine['RSI_val'] = "N/A"
-        print(f"Erreur RSI: {e}")
+        st.error(f"Erreur RSI: {e}")
 
     # ADX
     try:
@@ -242,7 +252,7 @@ def calculate_all_signals_pine(data):
     except Exception as e:
         signal_details_pine['ADX'] = "ErrADX"
         signal_details_pine['ADX_val'] = "N/A"
-        print(f"Erreur ADX: {e}")
+        st.error(f"Erreur ADX: {e}")
 
     # Heiken Ashi
     try:
@@ -260,7 +270,7 @@ def calculate_all_signals_pine(data):
             signal_details_pine['HA'] = "N/A"
     except Exception as e:
         signal_details_pine['HA'] = "ErrHA"
-        print(f"Erreur HA: {e}")
+        st.error(f"Erreur HA: {e}")
 
     # Smoothed Heiken Ashi
     try:
@@ -278,7 +288,7 @@ def calculate_all_signals_pine(data):
             signal_details_pine['SHA'] = "N/A"
     except Exception as e:
         signal_details_pine['SHA'] = "ErrSHA"
-        print(f"Erreur SHA: {e}")
+        st.error(f"Erreur SHA: {e}")
 
     # Ichimoku
     try:
@@ -289,13 +299,13 @@ def calculate_all_signals_pine(data):
         elif ichimoku_signal_val == -1:
             bear_confluences += 1
             signal_details_pine['Ichi'] = "▼"
-        elif ichimoku_signal_val == 0 and (len(data) < max(9,26,52) or (len(data) > 0 and pd.isna(data['Close'].iloc[-1]))):
+        elif ichimoku_signal_val == 0 and (len(data) < max(9, 26, 52) or (len(data) > 0 and pd.isna(data['Close'].iloc[-1]))):
             signal_details_pine['Ichi'] = "N/D"
         else:
             signal_details_pine['Ichi'] = "─"
     except Exception as e:
         signal_details_pine['Ichi'] = "ErrIchi"
-        print(f"Erreur Ichi: {e}")
+        st.error(f"Erreur Ichi: {e}")
 
     confluence_value = max(bull_confluences, bear_confluences)
     direction = "NEUTRE"
@@ -330,11 +340,9 @@ col1, col2 = st.columns([1, 3])
 
 with col1:
     st.subheader("⚙️ Paramètres")
-    min_conf = st.selectbox("Confluence minimum", (0,1,2,3,4,5,6), index=3, format_func=lambda x: f"{x} étoiles")
+    min_conf = st.selectbox("Confluence minimum", (0, 1, 2, 3, 4, 5, 6), index=3, format_func=lambda x: f"{x} étoiles")
     show_all = st.checkbox("Afficher toutes les paires", True)
-    scan_dis_td = TWELVEDATA_API_KEY is None
-    scan_tip_td = "Clé TwelveData non configurée." if scan_dis_td else "Scanner les paires Forex"
-    scan_btn = st.button("🔍 Lancer le Scan", type="primary", use_container_width=True, disabled=scan_dis_td, help=scan_tip_td)
+    scan_btn = st.button("🔍 Lancer le Scan", type="primary", use_container_width=True, disabled=not TWELVEDATA_API_KEY, help="Scanner les paires Forex")
 
 with col2:
     if scan_btn and TWELVEDATA_API_KEY:
@@ -345,14 +353,16 @@ with col2:
         total_pairs = len(FOREX_PAIRS_TWELVEDATA)
         for i, pair_symbol in enumerate(FOREX_PAIRS_TWELVEDATA):
             pnd = pair_symbol
-            cp = (i+1)/total_pairs
+            cp = (i + 1) / total_pairs
             pb.progress(cp)
-            stx.text(f"Analyse: {pnd} ({i+1}/{total_pairs})")
+            stx.text(f"Analyse: {pnd} ({i + 1}/{total_pairs})")
             d_h1_td = get_data_twelvedata(pair_symbol, interval_td="1h", outputsize_td=300)
             if d_h1_td is None or d_h1_td.empty:
-                pr_res.append({'Paire': pnd, 'Direction': 'ERR DATA', 'Conf. (0-6)': 0,
-                               'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
-                               'details': {'Info': 'Données TD non dispo (logs)'}})
+                pr_res.append({
+                    'Paire': pnd, 'Direction': 'ERR DATA', 'Conf. (0-6)': 0,
+                    'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
+                    'details': {'Info': 'Données TwelveData non disponibles'}
+                })
                 continue
             sigs = calculate_all_signals_pine(d_h1_td)
             if sigs:
@@ -370,40 +380,45 @@ with col2:
                 }
                 pr_res.append(rd)
             else:
-                pr_res.append({'Paire': pnd, 'Direction': 'ERR CALC', 'Conf. (0-6)': 0,
-                               'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
-                               'details': {'Info': 'Calcul échoué (TD)'}})
+                pr_res.append({
+                    'Paire': pnd, 'Direction': 'ERR CALC', 'Conf. (0-6)': 0,
+                    'Étoiles': 'N/A', 'RSI': 'N/A', 'ADX': 'N/A', 'Bull': 0, 'Bear': 0,
+                    'details': {'Info': 'Calcul échoué'}
+                })
             if i < total_pairs - 1:
-                time.sleep(8)
+                time.sleep(8)  # Respecter la limite de 8 appels par minute
         pb.empty()
         stx.empty()
         if pr_res:
             dfa = pd.DataFrame(pr_res)
             dfd = dfa[dfa['Conf. (0-6)'] >= min_conf].copy() if not show_all else dfa.copy()
             if not show_all:
-                st.success(f"🎯 {len(dfd)} paire(s) avec {min_conf}+ confluence (TD).")
+                st.success(f"🎯 {len(dfd)} paire(s) avec {min_conf}+ confluence.")
             else:
-                st.info(f"🔍 Affichage {len(dfd)} paires (TD).")
+                st.info(f"🔍 Affichage {len(dfd)} paires.")
             if not dfd.empty:
                 dfds = dfd.sort_values('Conf. (0-6)', ascending=False)
-                vcs = [c for c in ['Paire','Direction','Conf. (0-6)','Étoiles','RSI','ADX','Bull','Bear'] if c in dfds.columns]
+                vcs = [c for c in ['Paire', 'Direction', 'Conf. (0-6)', 'Étoiles', 'RSI', 'ADX', 'Bull', 'Bear'] if c in dfds.columns]
                 st.dataframe(dfds[vcs], use_container_width=True, hide_index=True)
-                with st.expander("📊 Détails des signaux (TD)"):
+                with st.expander("📊 Détails des signaux"):
                     for _, r in dfds.iterrows():
                         sm = r.get('details', {})
                         if not isinstance(sm, dict):
-                            sm = {'Info': 'Détails non dispo'}
-                        st.write(f"**{r.get('Paire','N/A')}** - {r.get('Étoiles','N/A')} ({r.get('Conf. (0-6)','N/A')}) - Dir: {r.get('Direction','N/A')}")
+                            sm = {'Info': 'Détails non disponibles'}
+                        st.write(f"**{r.get('Paire', 'N/A')}** - {r.get('Étoiles', 'N/A')} ({r.get('Conf. (0-6)', 'N/A')}) - Dir: {r.get('Direction', 'N/A')}")
                         dc = st.columns(6)
-                        so = ['HMA','RSI','ADX','HA','SHA','Ichi']
+                        so = ['HMA', 'RSI', 'ADX', 'HA', 'SHA', 'Ichi']
                         for idx, sk in enumerate(so):
                             dc[idx].metric(label=sk, value=sm.get(sk, "N/P"))
                         st.divider()
             else:
-                st.warning(f"❌ Aucune paire avec critères (TD). Vérifiez erreurs.")
+                st.warning("❌ Aucune paire ne répond aux critères. Vérifiez les erreurs.")
         else:
-            st.error("❌ Aucune paire traitée (TD). Vérifiez logs serveur.")
+            st.error("❌ Aucune paire traitée. Vérifiez les logs serveur.")
+    else:
+        st.info("Cliquez sur 'Lancer le Scan' pour analyser les paires Forex.")
 
 with st.expander("ℹ️ Informations"):
-    st.markdown("""**Signaux:** HMA(20),RSI(10),ADX(14)>=20,HA,SHA(10,10),Ichi(9,26,52). **Source:** TwelveData API.""")
-    st.caption("Scanner H1 (TwelveData). Respectez limites API.")
+    st.markdown("""**Signaux:** HMA(20), RSI(10), ADX(14)>=20, HA, SHA(10,10), Ichi(9,26,52). **Source:** TwelveData API.""")
+    st.caption("Scanner H1 (TwelveData). Respectez les limites de l'API gratuite (8 req/min).")
+       
